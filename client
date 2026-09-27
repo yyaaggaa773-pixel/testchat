@@ -1,0 +1,571 @@
+--[[
+  Anxium Chat GUI  —  connects to Railway Chat API
+  API: https://testchat-production-8c5d.up.railway.app
+]]
+
+local API_BASE = "https://testchat-production-8c5d.up.railway.app"
+local COOLDOWN_SEC = 10
+local POLL_INTERVAL = 1.5
+local MAX_VISIBLE = 80
+
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local HttpService = game:GetService("HttpService")
+local LP = Players.LocalPlayer
+
+local function httpRequest(opts)
+    local req = (syn and syn.request)
+        or (http and http.request)
+        or (fluxus and fluxus.request)
+        or (http_request)
+        or request
+    if not req then
+        error("[Chat] No HTTP request function (need executor)")
+    end
+    return req(opts)
+end
+
+local function jsonDecode(s)
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(s or "{}")
+    end)
+    return ok and data or nil
+end
+
+local function jsonEncode(t)
+    local ok, s = pcall(function()
+        return HttpService:JSONEncode(t)
+    end)
+    return ok and s or "{}"
+end
+
+-- ── state ──────────────────────────────────────────────────────────────────
+local lastId = 0
+local lastSendAt = 0
+local sending = false
+local open = true
+
+-- ── gui ────────────────────────────────────────────────────────────────────
+local function protect(gui)
+    pcall(function()
+        if syn and syn.protect_gui then syn.protect_gui(gui) end
+    end)
+    local parent = (gethui and gethui()) or game:GetService("CoreGui")
+    gui.Parent = parent
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AnxiumChatGUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.DisplayOrder = 120
+protect(ScreenGui)
+
+local ACCENT = Color3.fromRGB(160, 120, 255)
+local BG = Color3.fromRGB(18, 18, 24)
+local CARD = Color3.fromRGB(28, 28, 36)
+local TEXT = Color3.fromRGB(235, 235, 245)
+local DIM = Color3.fromRGB(140, 140, 155)
+
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.fromOffset(340, 420)
+Main.Position = UDim2.new(0, 16, 0.5, -210)
+Main.BackgroundColor3 = BG
+Main.BorderSizePixel = 0
+Main.Active = true
+Main.Parent = ScreenGui
+do
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 12)
+    c.Parent = Main
+    local s = Instance.new("UIStroke")
+    s.Color = Color3.fromRGB(50, 50, 65)
+    s.Thickness = 1
+    s.Parent = Main
+end
+
+-- drag
+do
+    local dragging, dragStart, startPos
+    Main.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = Main.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+    UIS.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch then
+            local d = input.Position - dragStart
+            Main.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + d.X,
+                startPos.Y.Scale, startPos.Y.Offset + d.Y
+            )
+        end
+    end)
+end
+
+-- header
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, 42)
+Header.BackgroundColor3 = CARD
+Header.BorderSizePixel = 0
+Header.Parent = Main
+do
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 12)
+    c.Parent = Header
+    local fix = Instance.new("Frame")
+    fix.Size = UDim2.new(1, 0, 0, 14)
+    fix.Position = UDim2.new(0, 0, 1, -14)
+    fix.BackgroundColor3 = CARD
+    fix.BorderSizePixel = 0
+    fix.Parent = Header
+end
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -90, 1, 0)
+Title.Position = UDim2.fromOffset(14, 0)
+Title.BackgroundTransparency = 1
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 15
+Title.TextColor3 = TEXT
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Text = "Anxium Chat"
+Title.Parent = Header
+
+local StatusDot = Instance.new("Frame")
+StatusDot.Size = UDim2.fromOffset(8, 8)
+StatusDot.Position = UDim2.new(1, -70, 0.5, -4)
+StatusDot.BackgroundColor3 = Color3.fromRGB(255, 180, 60)
+StatusDot.BorderSizePixel = 0
+StatusDot.Parent = Header
+do
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(1, 0)
+    c.Parent = StatusDot
+end
+
+local StatusLbl = Instance.new("TextLabel")
+StatusLbl.Size = UDim2.fromOffset(48, 16)
+StatusLbl.Position = UDim2.new(1, -58, 0.5, -8)
+StatusLbl.BackgroundTransparency = 1
+StatusLbl.Font = Enum.Font.Gotham
+StatusLbl.TextSize = 11
+StatusLbl.TextColor3 = DIM
+StatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+StatusLbl.Text = "..."
+StatusLbl.Parent = Header
+
+local MinBtn = Instance.new("TextButton")
+MinBtn.Size = UDim2.fromOffset(28, 28)
+MinBtn.Position = UDim2.new(1, -36, 0.5, -14)
+MinBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 52)
+MinBtn.BorderSizePixel = 0
+MinBtn.Font = Enum.Font.GothamBold
+MinBtn.TextSize = 14
+MinBtn.TextColor3 = TEXT
+MinBtn.Text = "–"
+MinBtn.Parent = Header
+do
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 6)
+    c.Parent = MinBtn
+end
+
+-- messages area
+local MsgScroll = Instance.new("ScrollingFrame")
+MsgScroll.Name = "Messages"
+MsgScroll.Size = UDim2.new(1, -16, 1, -120)
+MsgScroll.Position = UDim2.fromOffset(8, 50)
+MsgScroll.BackgroundColor3 = Color3.fromRGB(14, 14, 20)
+MsgScroll.BorderSizePixel = 0
+MsgScroll.ScrollBarThickness = 4
+MsgScroll.ScrollBarImageColor3 = ACCENT
+MsgScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+MsgScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+MsgScroll.Parent = Main
+do
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 8)
+    c.Parent = MsgScroll
+    local lay = Instance.new("UIListLayout")
+    lay.SortOrder = Enum.SortOrder.LayoutOrder
+    lay.Padding = UDim.new(0, 6)
+    lay.Parent = MsgScroll
+    local pad = Instance.new("UIPadding")
+    pad.PaddingTop = UDim.new(0, 8)
+    pad.PaddingBottom = UDim.new(0, 8)
+    pad.PaddingLeft = UDim.new(0, 8)
+    pad.PaddingRight = UDim.new(0, 8)
+    pad.Parent = MsgScroll
+end
+
+local EmptyLbl = Instance.new("TextLabel")
+EmptyLbl.Size = UDim2.new(1, -16, 0, 40)
+EmptyLbl.BackgroundTransparency = 1
+EmptyLbl.Font = Enum.Font.Gotham
+EmptyLbl.TextSize = 12
+EmptyLbl.TextColor3 = DIM
+EmptyLbl.Text = "No messages yet"
+EmptyLbl.LayoutOrder = 0
+EmptyLbl.Parent = MsgScroll
+
+-- cooldown bar
+local CdFrame = Instance.new("Frame")
+CdFrame.Size = UDim2.new(1, -16, 0, 4)
+CdFrame.Position = UDim2.new(0, 8, 1, -62)
+CdFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 52)
+CdFrame.BorderSizePixel = 0
+CdFrame.Parent = Main
+do
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(1, 0)
+    c.Parent = CdFrame
+end
+
+local CdFill = Instance.new("Frame")
+CdFill.Size = UDim2.new(0, 0, 1, 0)
+CdFill.BackgroundColor3 = ACCENT
+CdFill.BorderSizePixel = 0
+CdFill.Parent = CdFrame
+do
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(1, 0)
+    c.Parent = CdFill
+end
+
+local CdLbl = Instance.new("TextLabel")
+CdLbl.Size = UDim2.new(1, -16, 0, 14)
+CdLbl.Position = UDim2.new(0, 8, 1, -56)
+CdLbl.BackgroundTransparency = 1
+CdLbl.Font = Enum.Font.Gotham
+CdLbl.TextSize = 11
+CdLbl.TextColor3 = DIM
+CdLbl.TextXAlignment = Enum.TextXAlignment.Left
+CdLbl.Text = "Ready"
+CdLbl.Parent = Main
+
+-- input row
+local InputBox = Instance.new("TextBox")
+InputBox.Size = UDim2.new(1, -88, 0, 34)
+InputBox.Position = UDim2.new(0, 8, 1, -42)
+InputBox.BackgroundColor3 = CARD
+InputBox.BorderSizePixel = 0
+InputBox.Font = Enum.Font.Gotham
+InputBox.TextSize = 13
+InputBox.TextColor3 = TEXT
+InputBox.PlaceholderText = "Type a message..."
+InputBox.PlaceholderColor3 = DIM
+InputBox.Text = ""
+InputBox.ClearTextOnFocus = false
+InputBox.TextXAlignment = Enum.TextXAlignment.Left
+InputBox.Parent = Main
+do
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 8)
+    c.Parent = InputBox
+    local pad = Instance.new("UIPadding")
+    pad.PaddingLeft = UDim.new(0, 10)
+    pad.PaddingRight = UDim.new(0, 10)
+    pad.Parent = InputBox
+end
+
+local SendBtn = Instance.new("TextButton")
+SendBtn.Size = UDim2.fromOffset(68, 34)
+SendBtn.Position = UDim2.new(1, -76, 1, -42)
+SendBtn.BackgroundColor3 = ACCENT
+SendBtn.BorderSizePixel = 0
+SendBtn.Font = Enum.Font.GothamBold
+SendBtn.TextSize = 13
+SendBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+SendBtn.Text = "Send"
+SendBtn.Parent = Main
+do
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 8)
+    c.Parent = SendBtn
+end
+
+-- minimize toggle
+local collapsed = false
+MinBtn.MouseButton1Click:Connect(function()
+    collapsed = not collapsed
+    if collapsed then
+        MsgScroll.Visible = false
+        InputBox.Visible = false
+        SendBtn.Visible = false
+        CdFrame.Visible = false
+        CdLbl.Visible = false
+        Main.Size = UDim2.fromOffset(340, 42)
+        MinBtn.Text = "+"
+    else
+        MsgScroll.Visible = true
+        InputBox.Visible = true
+        SendBtn.Visible = true
+        CdFrame.Visible = true
+        CdLbl.Visible = true
+        Main.Size = UDim2.fromOffset(340, 420)
+        MinBtn.Text = "–"
+    end
+end)
+
+-- ── messages UI ────────────────────────────────────────────────────────────
+local orderCounter = 0
+local knownIds = {}
+
+local function addMessageRow(player, message, msgId)
+    if msgId and knownIds[msgId] then return end
+    if msgId then knownIds[msgId] = true end
+
+    if EmptyLbl.Parent then
+        EmptyLbl:Destroy()
+    end
+
+    orderCounter += 1
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, -4, 0, 0)
+    row.AutomaticSize = Enum.AutomaticSize.Y
+    row.BackgroundColor3 = Color3.fromRGB(24, 24, 32)
+    row.BorderSizePixel = 0
+    row.LayoutOrder = orderCounter
+    row.Parent = MsgScroll
+    do
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, 6)
+        c.Parent = row
+        local pad = Instance.new("UIPadding")
+        pad.PaddingTop = UDim.new(0, 6)
+        pad.PaddingBottom = UDim.new(0, 6)
+        pad.PaddingLeft = UDim.new(0, 8)
+        pad.PaddingRight = UDim.new(0, 8)
+        pad.Parent = row
+    end
+
+    local nameLbl = Instance.new("TextLabel")
+    nameLbl.Size = UDim2.new(1, 0, 0, 16)
+    nameLbl.BackgroundTransparency = 1
+    nameLbl.Font = Enum.Font.GothamBold
+    nameLbl.TextSize = 12
+    nameLbl.TextColor3 = ACCENT
+    nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+    nameLbl.Text = tostring(player or "?")
+    nameLbl.Parent = row
+
+    local textLbl = Instance.new("TextLabel")
+    textLbl.Size = UDim2.new(1, 0, 0, 0)
+    textLbl.AutomaticSize = Enum.AutomaticSize.Y
+    textLbl.Position = UDim2.fromOffset(0, 16)
+    textLbl.BackgroundTransparency = 1
+    textLbl.Font = Enum.Font.Gotham
+    textLbl.TextSize = 13
+    textLbl.TextColor3 = TEXT
+    textLbl.TextXAlignment = Enum.TextXAlignment.Left
+    textLbl.TextYAlignment = Enum.TextYAlignment.Top
+    textLbl.TextWrapped = true
+    textLbl.Text = tostring(message or "")
+    textLbl.Parent = row
+
+    -- prune old rows
+    local children = {}
+    for _, ch in ipairs(MsgScroll:GetChildren()) do
+        if ch:IsA("Frame") then
+            children[#children + 1] = ch
+        end
+    end
+    table.sort(children, function(a, b)
+        return a.LayoutOrder < b.LayoutOrder
+    end)
+    while #children > MAX_VISIBLE do
+        local old = table.remove(children, 1)
+        if old then old:Destroy() end
+    end
+
+    task.defer(function()
+        MsgScroll.CanvasPosition = Vector2.new(0, MsgScroll.AbsoluteCanvasSize.Y)
+    end)
+end
+
+local function setStatus(online)
+    if online then
+        StatusDot.BackgroundColor3 = Color3.fromRGB(80, 220, 120)
+        StatusLbl.Text = "online"
+        StatusLbl.TextColor3 = Color3.fromRGB(120, 220, 150)
+    else
+        StatusDot.BackgroundColor3 = Color3.fromRGB(220, 80, 80)
+        StatusLbl.Text = "offline"
+        StatusLbl.TextColor3 = Color3.fromRGB(220, 120, 120)
+    end
+end
+
+-- ── API ────────────────────────────────────────────────────────────────────
+local function fetchMessages()
+    local ok, res = pcall(function()
+        return httpRequest({
+            Url = API_BASE .. "/api/messages?after_id=" .. tostring(lastId) .. "&limit=50",
+            Method = "GET",
+        })
+    end)
+    if not ok or not res then
+        setStatus(false)
+        return
+    end
+    local code = res.StatusCode or res.Status or 0
+    if code < 200 or code >= 300 then
+        setStatus(false)
+        return
+    end
+    setStatus(true)
+    local data = jsonDecode(res.Body)
+    if not data or not data.ok or type(data.messages) ~= "table" then
+        return
+    end
+    for _, m in ipairs(data.messages) do
+        local id = tonumber(m.id) or 0
+        if id > lastId then
+            lastId = id
+        end
+        addMessageRow(m.player, m.message, id)
+    end
+end
+
+local function cooldownLeft()
+    local left = COOLDOWN_SEC - (tick() - lastSendAt)
+    return math.max(0, left)
+end
+
+local function updateCooldownUI()
+    local left = cooldownLeft()
+    if left <= 0 then
+        CdFill.Size = UDim2.new(1, 0, 1, 0)
+        CdLbl.Text = "Ready"
+        CdLbl.TextColor3 = Color3.fromRGB(120, 220, 150)
+        SendBtn.BackgroundColor3 = ACCENT
+        SendBtn.Text = "Send"
+    else
+        local p = 1 - (left / COOLDOWN_SEC)
+        CdFill.Size = UDim2.new(math.clamp(p, 0, 1), 0, 1, 0)
+        CdLbl.Text = string.format("Cooldown: %.1fs", left)
+        CdLbl.TextColor3 = Color3.fromRGB(255, 180, 100)
+        SendBtn.BackgroundColor3 = Color3.fromRGB(80, 70, 100)
+        SendBtn.Text = string.format("%.0fs", left)
+    end
+end
+
+local function sendMessage()
+    if sending then return end
+    local text = (InputBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if text == "" then return end
+
+    local left = cooldownLeft()
+    if left > 0 then
+        CdLbl.Text = string.format("Wait %.1fs", left)
+        CdLbl.TextColor3 = Color3.fromRGB(255, 120, 120)
+        return
+    end
+
+    local playerName = LP.DisplayName or LP.Name
+    sending = true
+    SendBtn.Text = "..."
+    InputBox.Text = ""
+
+    local ok, res = pcall(function()
+        return httpRequest({
+            Url = API_BASE .. "/api/send",
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json",
+            },
+            Body = jsonEncode({
+                player = playerName,
+                message = text,
+            }),
+        })
+    end)
+
+    sending = false
+
+    if not ok or not res then
+        setStatus(false)
+        CdLbl.Text = "Send failed"
+        CdLbl.TextColor3 = Color3.fromRGB(255, 100, 100)
+        updateCooldownUI()
+        return
+    end
+
+    local data = jsonDecode(res.Body)
+    local code = res.StatusCode or res.Status or 0
+
+    if data and data.ok then
+        lastSendAt = tick()
+        setStatus(true)
+        if data.message then
+            local m = data.message
+            local id = tonumber(m.id) or 0
+            if id > lastId then lastId = id end
+            addMessageRow(m.player, m.message, id)
+        end
+    elseif data and data.error == "cooldown" then
+        local retry = tonumber(data.retry_after) or COOLDOWN_SEC
+        lastSendAt = tick() - (COOLDOWN_SEC - retry)
+        CdLbl.Text = string.format("Cooldown: %.1fs", retry)
+        CdLbl.TextColor3 = Color3.fromRGB(255, 180, 100)
+    else
+        local err = (data and data.error) or ("HTTP " .. tostring(code))
+        CdLbl.Text = tostring(err)
+        CdLbl.TextColor3 = Color3.fromRGB(255, 100, 100)
+        if code == 0 or code >= 500 then
+            setStatus(false)
+        end
+    end
+    updateCooldownUI()
+end
+
+SendBtn.MouseButton1Click:Connect(sendMessage)
+InputBox.FocusLost:Connect(function(enter)
+    if enter then sendMessage() end
+end)
+
+-- ── loops ──────────────────────────────────────────────────────────────────
+task.spawn(function()
+    while ScreenGui.Parent do
+        pcall(fetchMessages)
+        task.wait(POLL_INTERVAL)
+    end
+end)
+
+task.spawn(function()
+    while ScreenGui.Parent do
+        updateCooldownUI()
+        task.wait(0.1)
+    end
+end)
+
+-- first ping
+task.spawn(function()
+    local ok, res = pcall(function()
+        return httpRequest({
+            Url = API_BASE .. "/api/health",
+            Method = "GET",
+        })
+    end)
+    if ok and res and (res.StatusCode or res.Status or 0) == 200 then
+        setStatus(true)
+        addMessageRow("System", "Connected to chat API", -1)
+    else
+        setStatus(false)
+        addMessageRow("System", "Cannot reach API — check executor HTTP", -2)
+    end
+end)
+
+print("[Anxium Chat] loaded → " .. API_BASE)
