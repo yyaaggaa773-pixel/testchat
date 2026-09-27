@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Local LAN Chat API for Roblox scripts.
-Run:  python roblox_chat_api.py
-Default: http://0.0.0.0:8765
+Chat API for Roblox scripts (LAN or cloud host).
+
+Local:   python api.py
+Cloud:   host sets PORT env; start command: python api.py
+         or: gunicorn -b 0.0.0.0:$PORT api:app
 """
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import time
@@ -14,18 +17,24 @@ from collections import deque
 from typing import Any
 
 from flask import Flask, jsonify, request
-from flask_cors import CORS
+
+try:
+    from flask_cors import CORS
+except ImportError:
+    CORS = None
 
 # ── config ──────────────────────────────────────────────────────────────────
 HOST = "0.0.0.0"
-PORT = 8765
+# Cloud hosts (Render/Railway/etc) inject PORT — always use it when present
+PORT = int(os.environ.get("PORT", "8765"))
 COOLDOWN_SEC = 10.0
 MAX_MESSAGES = 200
 MAX_NAME_LEN = 32
 MAX_TEXT_LEN = 200
 
 app = Flask(__name__)
-CORS(app)
+if CORS is not None:
+    CORS(app)
 
 _lock = threading.Lock()
 _messages: deque[dict[str, Any]] = deque(maxlen=MAX_MESSAGES)
@@ -183,18 +192,23 @@ def clear_messages():
 
 
 def main():
+    port = int(os.environ.get("PORT", str(PORT)))
     ip = _local_ip()
     print("=" * 50)
-    print("  Roblox Chat API  (LAN)")
+    print("  Roblox Chat API")
     print("=" * 50)
-    print(f"  Local:   http://127.0.0.1:{PORT}")
-    print(f"  Network: http://{ip}:{PORT}")
+    print(f"  Bind:    {HOST}:{port}")
+    print(f"  Local:   http://127.0.0.1:{port}")
+    print(f"  Network: http://{ip}:{port}")
     print(f"  Cooldown: {COOLDOWN_SEC:.0f}s per player")
     print()
-    print("  POST /api/send   JSON: {\"player\":\"Name\",\"message\":\"hi\"}")
-    print("  GET  /api/messages")
+    print("  GET  /              info")
+    print("  GET  /api/health    status")
+    print("  GET  /api/messages  list")
+    print("  POST /api/send      {\"player\":\"Name\",\"message\":\"hi\"}")
     print("=" * 50)
-    app.run(host=HOST, port=PORT, debug=False, threaded=True)
+    # threaded=True so multiple Roblox clients can hit at once
+    app.run(host=HOST, port=port, debug=False, threaded=True)
 
 
 if __name__ == "__main__":
